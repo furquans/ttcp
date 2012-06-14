@@ -91,7 +91,7 @@ static char * useRCSid = ( RCSid + ( (char *)&useRCSid - (char *)&useRCSid ) );
 #include <unistd.h>
 
 struct sockaddr_storage frominet;
-struct addrinfo hints, *res, *res0;
+struct addrinfo hints, *res, *res0, *servinfo;
 struct ipv6_mreq mreq6;
 struct ip_mreq mreq;
 
@@ -109,6 +109,7 @@ int udp = 0;			/* 0 = tcp, !0 = udp */
 int options = 0;		/* socket options */
 int one = 1;                    /* for 4.3 BSD style setsockopt() */
 char *port = "5001";		/* TCP/UDP port number */
+char *cntrlUdpPort = "5005";    /* Control port for UDP Tx */
 char *host;			/* ptr to name of host */
 int trans;			/* 0=receive, !0=transmit mode */
 int sinkmode = 0;		/* 0=normal I/O, !0=sink/source mode */
@@ -496,16 +497,85 @@ main(int argc, char **argv)
 				(void)Nwrite(fd, buf, 4); /* rcvr end */
 		} else {
 			if (udp) {
-			    while ((cnt = Nread(fd, buf, buflen)) > 0)  {
-				    static int going = 0;
-				    if (cnt <= 4) {
-					    if (going)
-						    break;	/* "EOF" */
-					    going = 1;
-					    prep_timer();
-				    } else
-					    nbytes += cnt;
+			    /* Create a tcp control socket and wait for start
+			       bytes */
+			    /* 1. TCP Control Socket Create 
+			       2. Bind and wait for accept
+			       3. Read from -- marks start
+			    */
+			    int udpCtrlFd, newCtrlFd; 
+			    int max_sock;
+			    fd_set fds;
+			    socklen_t addr_size;
+			    struct sockaddr_storage their_addr;
+
+			    memset(&hints, 0, sizeof(hints));
+			    hints.ai_family = AF_INET;
+			    hints.ai_socktype = SOCK_STREAM;
+			    hints.ai_flags = AI_PASSIVE;
+
+			    getaddrinfo(NULL, cntrlUdpPort, &hints, &servinfo);
+			    
+			    udpCtrlFd = socket(servinfo->ai_family,
+					       servinfo->ai_socktype,
+					       servinfo->ai_protocol);
+
+			    if (udpCtrlFd < 0) {
+				
 			    }
+
+			    bind(udpCtrlFd, servinfo->ai_addr,
+				 servinfo->ai_addrlen);
+			    listen(udpCtrlFd, 5);
+
+			    addr_size = sizeof(their_addr);
+			    newCtrlFd = accept(udpCtrlFd, 
+					       (struct sockaddr *)&their_addr,
+					       &addr_size);
+
+			    prep_timer();
+			    FD_ZERO(&fds);
+			    FD_SET(newCtrlFd, &fds);
+			    FD_SET(fd, &fds);
+			    max_sock = (fd > newCtrlFd)? fd : newCtrlFd;
+
+			    /* Select to see on which socket we have rx
+			       1. If rx on tcp socket, quit loop
+			       2. If rx on udp socket, read data and continue
+			       loop
+			    */
+			    while(1) {
+				int active_fds;
+				active_fds = select(max_sock + 1,
+						    &fds,
+						    NULL,
+						    NULL,
+						    NULL);
+
+				if (active_fds < 0) {
+				    err("select");
+				}
+
+				if (FD_ISSET(newCtrlFd, &fds)) {
+				    char buf[2];
+				    int count = 1;
+				    if ( recv(newCtrlFd, buf, count, 0) == 0 )
+					break;
+				} else {
+				    cnt = Nread(fd, buf, buflen);
+				    nbytes += cnt;
+				}
+			    }
+			    /* while ((cnt = Nread(fd, buf, buflen)) > 0)  { */
+			    /* 	    /\* static int going = 0; *\/ */
+			    /* 	    if (cnt <= 4) { */
+			    /* 		    if (going) */
+			    /* 			    break;	/\* "EOF" *\/ */
+			    /* 		    going = 1; */
+			    /* 		    prep_timer(); */
+			    /* 	    } else */
+			    /* 		    nbytes += cnt; */
+			    /* } */
 			} else {
 			    while ((cnt = Nread(fd, buf, buflen)) > 0)  {
 				    nbytes += cnt;
